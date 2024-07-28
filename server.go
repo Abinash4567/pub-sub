@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -31,6 +32,16 @@ type Message struct {
 }
 
 func main() {
+	// Increase resources limitations
+	// var rLimit syscall.Rlimit
+	// if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+	// 	panic(err)
+	// }
+	// rLimit.Cur = rLimit.Max
+	// if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+	// 	panic(err)
+	// }
+
 	var err error
 	epoller, err = createEpoll()
 	if err != nil {
@@ -68,21 +79,35 @@ func handleWriterEvents() {
 
             epoller.WriterLock.Lock() // Lock for all operations
 
-            if event.Events&unix.EPOLLIN != 0 {
+            if event.Events & (unix.EPOLLERR|unix.EPOLLHUP) != 0 {
+				log.Println("Inside Exiting block")
+                closeWriterConnection()
+                epoller.WriterLock.Unlock()
+            }else if event.Events & unix.EPOLLIN != 0 {
                 if epoller.sender == nil {
-                    log.Println("Sender is nil")
-                    epoller.WriterLock.Unlock()
-                    continue
-                }
+					log.Println("Sender is nil")
+					epoller.WriterLock.Unlock()
+					continue
+				}
+			
+				msg, op, err := wsutil.ReadClientData(epoller.sender)
+				if err != nil {
+					if err == io.EOF || err == io.ErrUnexpectedEOF {
+						log.Println("Client closed connection")
+						closeWriterConnection()
+					}
+					epoller.WriterLock.Unlock()
+					continue
+				}
+			
+				if len(msg) == 0 {
+					log.Println("Received empty message, client might have closed connection")
+					closeWriterConnection()
+					epoller.WriterLock.Unlock()
+					continue
+				}
 
                 log.Printf("Got Message from Writer Client. Broadcasting it.\n")
-                msg, op, err := wsutil.ReadClientData(epoller.sender)
-                if err != nil {
-                    log.Println("Error Reading message from Writer client:", err)
-                    closeWriterConnection()
-                    epoller.WriterLock.Unlock()
-                    continue
-                }
 
                 if op != ws.OpText {
                     log.Printf("Expected text message, got %d", op)
@@ -100,10 +125,7 @@ func handleWriterEvents() {
 
                 epoller.WriterLock.Unlock()
                 broadcastMessage(message, op)
-            } else if event.Events&(unix.EPOLLERR|unix.EPOLLHUP) != 0 {
-                closeWriterConnection()
-                epoller.WriterLock.Unlock()
-            } else {
+            }else {
                 log.Printf("Unexpected event type: %v", event.Events)
                 epoller.WriterLock.Unlock()
             }
@@ -129,7 +151,7 @@ func handleReaderEvents() {
 		if len(connections) == 0 {
 			continue
 		}
-		
+
 		if err != nil {
 			log.Printf("Failed to epoll wait: %v", err)
 			continue
@@ -254,7 +276,7 @@ func wsHandlerReader(w http.ResponseWriter, r *http.Request) {
 
 func (epoller *epoll) WaitReader() ([]net.Conn, error) {
 	events := make([]unix.EpollEvent, 100)
-	n, err := unix.EpollWait(epoller.fdReader, events, 1)
+	n, err := unix.EpollWait(epoller.fdReader, events, -1)
 	if err != nil {
 		return nil, err
 	}
