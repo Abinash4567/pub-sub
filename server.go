@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -9,8 +10,8 @@ import (
 	"syscall"
 
 	"github.com/gobwas/ws"
-	"golang.org/x/sys/unix"
 	"github.com/gobwas/ws/wsutil"
+	"golang.org/x/sys/unix"
 )
 
 var epoller *epoll
@@ -22,6 +23,11 @@ type epoll struct {
 	fdWriter	int
 	Readerlock  *sync.RWMutex
 	WriterLock  *sync.RWMutex
+}
+
+type Message struct {
+    Type    string `json:"type"`
+    Content string `json:"content"`
 }
 
 func main() {
@@ -45,29 +51,57 @@ func main() {
 	}
 }
 
-func handleWriterEvents()
-{
+func handleWriterEvents(){
 	for{
-		event := make([]unix.EpollEvent, 1)
-		n, err := unix.EpollWait(epoller.fdWriter, events, -1)
+		event := make([]unix.EpollEvent, 10)
+		_, err := unix.EpollWait(epoller.fdWriter, event, -1)
 		if err != nil {
-			return nil, err
+			log.Println("Error getting file descriptor")
+			return
 		}
-
+		if len(event)==0{
+			log.Println("Hello")
+			continue
+		}
+		log.Println("Got request for Closing Writer Connection")
 		
-		if event.Events & unix.EPOLLIN !=0 {
-			brodcastMessage()
-		}else {
+		if event[0].Events & unix.EPOLLIN !=0 {
+			log.Printf("Got Message from Writer Client. \n Broadcasting it. \n")
+			msg, op, err := wsutil.ReadClientData(*epoller.sender)
+			if err != nil {
+				log.Println("Error Reading message from Writer client")
+				continue
+			}
 
+			// Check if it's a text message (JSON is typically sent as text)
+			if op != ws.OpText {
+				log.Printf("Expected text message, got %d", op)
+				continue
+			}
+
+			// Parse the JSON
+			var message Message
+			err = json.Unmarshal(msg, &message)
+			if err != nil {
+				log.Println("Error parsing JSON message")
+			}
+			brodcastMessage(message, op)
+		}else {
+			epoller.WriterLock.RLock()
+			var temp net.Conn
+			epoller.sender = &temp
+			epoller.WriterLock.RLock()
 		}
-		epoller.WriterLock.RLock()
-		epoller.WriterLock.RUnlock()
 	}
 }
 
 func handleReaderEvents(){
 	for{
 		connections, err := epoller.WaitReader()
+
+		if len(connections) == 0{
+			continue
+		}
 		if err != nil {
 			log.Printf("Failed to epoll wait %v", err)
 			continue
@@ -94,7 +128,7 @@ func (e *epoll) RemoveReader(conn net.Conn) error {
 	e.Readerlock.Lock()
 	defer e.Readerlock.Unlock()
 	delete(e.clients, fd)
-	if len(e.clients)%100 == 0 {
+	if len(e.clients) % 100 == 0 {
 		log.Printf("Total number of connections: %v", len(e.clients))
 	}
 	log.Println("Removed Reader Client")
@@ -142,11 +176,10 @@ func wsHandlerWriter(w http.ResponseWriter, r *http.Request){
 	log.Println(epoller.sender);
 
 	if epoller.sender!=nil{
-			http.Error(w, "Sender already connected", http.StatusConflict)
-			log.Println("Received duplicate request for write")
-			return
-		}
-
+		http.Error(w, "Sender already connected", http.StatusConflict)
+		log.Println("Received duplicate request for write")
+		return
+	}
 
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
@@ -157,7 +190,7 @@ func wsHandlerWriter(w http.ResponseWriter, r *http.Request){
 	log.Println("Connection Upgraded", conn)
 	log.Println("Creating Events for writer in Epoll")
 
-	fd := websocketFD(conn) 
+	fd := websocketFD(conn)
 	err = unix.EpollCtl(epoller.fdWriter, syscall.EPOLL_CTL_ADD, fd, &unix.EpollEvent{Events: unix.EPOLLIN | unix.EPOLLERR | unix.EPOLLRDHUP , Fd: int32(fd)})
 	if err != nil {
 		log.Println("Error Occured creating epoll event")
@@ -188,12 +221,12 @@ func wsHandlerReader(w http.ResponseWriter, r *http.Request){
 	}
 
 	epoller.Readerlock.Lock()
-	epoller.clients[fd] = conn
 	defer epoller.Readerlock.Unlock()
+	epoller.clients[fd] = conn
 	if len(epoller.clients)%100 == 0 {
 		log.Printf("Total number of connections: %v", len(epoller.clients))
 	}
-	log.Println("Reader connection Succeed", epoller.sender)
+	log.Println("Reader connection Succeed", conn)
 }
 
 func (epoller *epoll) WaitReader() ([]net.Conn, error) {
@@ -213,26 +246,14 @@ func (epoller *epoll) WaitReader() ([]net.Conn, error) {
 	return connections, nil
 }
 
-func brodcastMessage(){
-	msg, op, err := wsutil.ReadClientData()
-		if err != nil {
-			log.Println("Read error:", err)
-			return
-		}
+func brodcastMessage(mes Message, op ws.OpCode){
+	epoller.Readerlock.Lock()
+	defer epoller.Readerlock.Lock()
 
-		// Ensure the message is a text message
-		if op == ws.OpText {
-			var message Message
-			// Unmarshal the JSON data into a Go struct
-			err = json.Unmarshal(msg, &message)
-			if err != nil {
-				log.Println("Unmarshal error:", err)
-				continue
-			}
-
-			// Print the received message
-			fmt.Printf("Received message: %+v\n", message)
-		} else {
-			log.Println("Unsupported message type:", op)
-		}
+	for _, ReaderClient := range epoller.clients {
+		err := wsutil.WriteServerMessage(ReaderClient, op, []byte(mes.Content))
+            if err != nil {
+                log.Println("Write error:", err)
+            }
+	}
 }
