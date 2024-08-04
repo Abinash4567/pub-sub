@@ -1,7 +1,7 @@
 <p align='center'> 
   <img src="https://github.com/user-attachments/assets/11fc9583-0460-4b18-bf2e-3412f67f76ba" alt="logo">
-  <h1 align="center">pub-sub</h1>
-  <h2 align="center">Broadcast your messagages at ease</h2>
+  <h3 align="center">pub-sub</h3>
+  <h3 align="center">Broadcast your messagages at ease</h3>
 </p>
 
 ## About the Project
@@ -12,11 +12,13 @@ This Go-based microservice facilitates efficient, large-scale message broadcasti
 ### Built With
 
 - [go](https://go.dev/)
+- [ws](https://github.com/gobwas/ws)
+- [sysCall](golang.org/x/sys/unix)
 
 ## Usage
 
 1. Clone this repo.
 2. start Server by running `go run server.go`.
 3. Create a sever connection `ws://localhost:8000/sender`.
-4. Connect as many clients posisble `ws://localhost:8000s/receiver`.
+4. Connect as many clients posisble `ws://localhost:8000/receiver`.
 5. Start sending meaages to all clients from sender connection.
